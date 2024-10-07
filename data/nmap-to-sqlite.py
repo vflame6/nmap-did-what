@@ -218,15 +218,16 @@ def insert_data(conn, scan, hosts, compare=False, compare_scan=None, compare_hos
             port_ids[port['port']] = c.lastrowid
             
         if compare:
-            compare_host_check = filter(lambda x: x['ip'] == host['ip'], compare_hosts)
+            compare_host_check = list(filter(lambda x: x['ip'] == host['ip'], compare_hosts))
             if compare_host_check:
                 compare_host = compare_host_check[0]
-                compare_ports = compare_host['ports']
+                compare_ports = (x['port'] for x in compare_host['ports'])
+                host_ports = (x['port'] for x in host['ports'])
 
-                compare_result = set(host['ports']).difference(compare_ports)
+                compare_result = set(host_ports).difference(compare_ports)
                 for compare_result_port in compare_result:
                     c.execute("INSERT INTO daily_unique (scan_id, host_id, port_id, diff_time) VALUES (?, ?, ?, ?)",
-                              (scan_id, host_id, port_ids[compare_result_port['port']], host['end_time']))
+                              (scan_id, host_id, port_ids[compare_result_port], host['end_time']))
             else:
                 for port in host['ports']:
                     c.execute("INSERT INTO daily_unique (scan_id, host_id, port_id, diff_time) VALUES (?, ?, ?, ?)",
