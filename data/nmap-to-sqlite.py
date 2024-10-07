@@ -1,12 +1,12 @@
 import xml.etree.ElementTree as ET
 import sqlite3
-from datetime import datetime
 import argparse
 
 #
 # Script to parse nmap xml files and populate an SQLite DB
 # use with Grafana Dashboard - https://hackertarget.com/nmap-dashboard-with-grafana/
 #
+
 
 def parse_nmap_xml(xml_file):
     tree = ET.parse(xml_file)
@@ -141,52 +141,64 @@ def parse_nmap_xml(xml_file):
 
     return scan, hosts
 
+
 def create_database(db_name):
     conn = sqlite3.connect(db_name)
     c = conn.cursor()
 
     c.execute('''CREATE TABLE IF NOT EXISTS scans
-                 (id INTEGER PRIMARY KEY AUTOINCREMENT,
-                 nmap_version TEXT,
-                 command_line TEXT,
-                 start_time INTEGER,
-                 elapsed_time TEXT,
-                 total_hosts INTEGER,
-                 total_open_ports INTEGER)''')
+                (id INTEGER PRIMARY KEY AUTOINCREMENT,
+                nmap_version TEXT,
+                command_line TEXT,
+                start_time INTEGER,
+                elapsed_time TEXT,
+                total_hosts INTEGER,
+                total_open_ports INTEGER)''')
     
     c.execute('''CREATE TABLE IF NOT EXISTS hosts
-                 (id INTEGER PRIMARY KEY AUTOINCREMENT,
-                 scan_id INTEGER,
-                 ip TEXT,
-                 hostname TEXT,
-                 os TEXT,
-                 ports_tested INTEGER,
-                 ports_open INTEGER,
-                 ports_closed INTEGER,
-                 ports_filtered INTEGER,
-                 start_time INTEGER,
-                 end_time INTEGER,
-                 FOREIGN KEY (scan_id) REFERENCES scans (id))''')
+                (id INTEGER PRIMARY KEY AUTOINCREMENT,
+                scan_id INTEGER,
+                ip TEXT,
+                hostname TEXT,
+                os TEXT,
+                ports_tested INTEGER,
+                ports_open INTEGER,
+                ports_closed INTEGER,
+                ports_filtered INTEGER,
+                start_time INTEGER,
+                end_time INTEGER,
+                FOREIGN KEY (scan_id) REFERENCES scans (id))''')
 
     c.execute('''CREATE TABLE IF NOT EXISTS ports
-                 (id INTEGER PRIMARY KEY AUTOINCREMENT,
-                 scan_id INTEGER,
-                 host_id INTEGER,
-                 port TEXT,
-                 protocol TEXT,
-                 state TEXT,
-                 service_name TEXT,
-                 service_info TEXT,
-                 http_title TEXT,
-                 ssl_common_name TEXT,
-                 ssl_issuer TEXT,
-                 FOREIGN KEY (scan_id) REFERENCES scans (id),
-                 FOREIGN KEY (host_id) REFERENCES hosts (id))''')
+                (id INTEGER PRIMARY KEY AUTOINCREMENT,
+                scan_id INTEGER,
+                host_id INTEGER,
+                port TEXT,
+                protocol TEXT,
+                state TEXT,
+                service_name TEXT,
+                service_info TEXT,
+                http_title TEXT,
+                ssl_common_name TEXT,
+                ssl_issuer TEXT,
+                FOREIGN KEY (scan_id) REFERENCES scans (id),
+                FOREIGN KEY (host_id) REFERENCES hosts (id))''')
+    
+    c.execute('''CREATE TABLE IF NOT EXISTS daily_unique
+                (id INTEGER PRIMARY KEY AUTOINCREMENT,
+                scan_id INTEGER,
+                host_id INTEGER,
+                port_id INTEGER,
+                diff_time INTEGER,
+                FOREIGN KEY (scan_id) REFERENCES scans (id),
+                FOREIGN KEY (host_id) REFERENCES hosts (id),
+                FOREIGN KEY (port_id) REFERENCES ports (id))''')
     
     conn.commit()
     return conn
 
-def insert_data(conn, scan, hosts):
+
+def insert_data(conn, scan, hosts, compare=False, compare_scan=None, compare_hosts=None):
     c = conn.cursor()
     
     c.execute("INSERT INTO scans (nmap_version, command_line, start_time, elapsed_time, total_hosts, total_open_ports) VALUES (?, ?, ?, ?, ?, ?)",
@@ -197,16 +209,36 @@ def insert_data(conn, scan, hosts):
         c.execute("INSERT INTO hosts (scan_id, ip, hostname, os, ports_tested, ports_open, ports_closed, ports_filtered, start_time, end_time) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                   (scan_id, host['ip'], host['hostname'], host['os'], host['ports_tested'], host['ports_open'], host['ports_closed'], host['ports_filtered'], host['start_time'], host['end_time']))
         host_id = c.lastrowid
+
+        port_ids = {}
         
         for port in host['ports']:
             c.execute("INSERT INTO ports (scan_id, host_id, port, protocol, state, service_name, service_info, http_title, ssl_common_name, ssl_issuer) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                       (scan_id, host_id, port['port'], port['protocol'], port['state'], port['service_name'], port['service_info'], port['http_title'], port['ssl_common_name'], port['ssl_issuer']))
-     
+            port_ids[port['port']] = c.lastrowid
+            
+        if compare:
+            compare_host_check = filter(lambda x: x['ip'] == host['ip'], compare_hosts)
+            if compare_host_check:
+                compare_host = compare_host_check[0]
+                compare_ports = compare_host['ports']
+
+                compare_result = set(host['ports']).difference(compare_ports)
+                for compare_result_port in compare_result:
+                    c.execute("INSERT INTO daily_unique (scan_id, host_id, port_id, diff_time) VALUES (?, ?, ?, ?)",
+                              (scan_id, host_id, port_ids[compare_result_port['port']], host['end_time']))
+            else:
+                for port in host['ports']:
+                    c.execute("INSERT INTO daily_unique (scan_id, host_id, port_id, diff_time) VALUES (?, ?, ?, ?)",
+                              (scan_id, host_id, port_ids[port['port']], host['end_time']))
+
     conn.commit()
+
 
 def main():
     parser = argparse.ArgumentParser(description="Process nmap scan results.")
     parser.add_argument("xml_file", help="Path to the nmap output XML file")
+    parser.add_argument("-c", "--compare", help="Path to the nmap output XML file to compare with")
     args = parser.parse_args()
 
     xml_file = args.xml_file
@@ -214,9 +246,16 @@ def main():
 
     scan, hosts = parse_nmap_xml(xml_file)
     conn = create_database(db_name)
-    insert_data(conn, scan, hosts)
+
+    if args.compare is not None:
+        compare_xml_file = args.compare
+        compare_scan, compare_hosts = parse_nmap_xml(compare_xml_file)
+        insert_data(conn, scan, hosts, compare=True, compare_scan=compare_scan, compare_hosts=compare_hosts)
+    else:
+        insert_data(conn, scan, hosts)
 
     conn.close()
+
 
 if __name__ == '__main__':
     main()
